@@ -1,102 +1,105 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits } = require('discord.js');
 const { DateTime } = require('luxon');
+
+const TOKEN = process.env.TOKEN;
+const CHANNEL_ID = process.env.CHANNEL_ID;
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const TOKEN = process.env.TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+let messageRef;
 
-let messageId = null;
-
+// 🎯 Raid schedule logic (CET)
 function getRaidStatus() {
   const now = DateTime.now().setZone('Europe/Berlin');
-  const day = now.weekday;
+
+  const isWeekend = now.weekday >= 6;
 
   let start, end;
-  const isWeekend = (day === 6 || day === 7);
 
   if (isWeekend) {
+    // Weekend: 09:00 - 03:00 (next day)
     start = now.set({ hour: 9, minute: 0, second: 0 });
-    end = start.plus({ days: 1 }).set({ hour: 3 });
 
+    end = now
+      .plus({ days: 1 })
+      .set({ hour: 3, minute: 0, second: 0 });
+
+    // If before 09:00, we’re still in the previous raid window
     if (now.hour < 3) {
-      start = start.minus({ days: 1 });
+      start = now.minus({ days: 1 }).set({ hour: 9, minute: 0, second: 0 });
       end = now.set({ hour: 3, minute: 0, second: 0 });
     }
+
   } else {
+    // Weekday: 15:00 - 23:00
     start = now.set({ hour: 15, minute: 0, second: 0 });
     end = now.set({ hour: 23, minute: 0, second: 0 });
   }
 
-  const isActive = now >= start && now <= end;
+  const inRaid = now >= start && now < end;
 
-  let nextChange;
+  const next = inRaid ? end : start;
 
-  if (isActive) {
-    nextChange = end;
-  } else {
-    if (now < start) {
-      nextChange = start;
-    } else {
-      let next = now.plus({ days: 1 });
+  const diff = next.diff(now, ['hours', 'minutes', 'seconds']).toObject();
 
-      const nextDay = next.weekday;
-      const weekend = (nextDay === 6 || nextDay === 7);
+  const countdown = `${Math.floor(diff.hours || 0)}h ${Math.floor(diff.minutes || 0)}m ${Math.floor(diff.seconds || 0)}s`;
 
-      if (weekend) {
-        next = next.set({ hour: 9, minute: 0, second: 0 });
-      } else {
-        next = next.set({ hour: 15, minute: 0, second: 0 });
-      }
-
-      nextChange = next;
-    }
-  }
-
-  const diff = nextChange.diff(now, ['hours', 'minutes']).toObject();
-
-  return {
-    isActive,
-    nowCET: now,
-    nowEST: now.setZone('America/New_York'),
-    timeRemaining: `${Math.floor(diff.hours)}h ${Math.floor(diff.minutes)}m`
-  };
+  return { now, inRaid, countdown };
 }
 
+// 🕒 Format CET + EST
+function formatTimes(now) {
+  const cet = now.toFormat('HH:mm');
+
+  const est = now
+    .setZone('America/New_York')
+    .toFormat('h:mm a'); // 12-hour format with AM/PM
+
+  return { cet, est };
+}
+
+// 🔁 Update Discord message
 async function updateMessage() {
   const channel = await client.channels.fetch(CHANNEL_ID);
-  const status = getRaidStatus();
 
-  const embed = new EmbedBuilder()
-    .setTitle('🏴 Raid Status')
-    .setColor(status.isActive ? 0x00ff00 : 0xff0000)
-    .addFields(
-      { name: 'Status', value: status.isActive ? '🟢 ACTIVE' : '🔴 INACTIVE' },
-      { name: 'CET', value: status.nowCET.toFormat('HH:mm'), inline: true },
-      { name: 'EST', value: status.nowEST.toFormat('HH:mm'), inline: true },
-      { name: 'Next Change In', value: status.timeRemaining }
-    );
+  const { now, inRaid, countdown } = getRaidStatus();
+  const { cet, est } = formatTimes(now);
 
-  if (!messageId) {
-    const msg = await channel.send({ embeds: [embed] });
-    messageId = msg.id;
-  } else {
-    try {
-      const msg = await channel.messages.fetch(messageId);
-      await msg.edit({ embeds: [embed] });
-    } catch {
-      const msg = await channel.send({ embeds: [embed] });
-      messageId = msg.id;
+  const status = inRaid ? "🟢 RAID ACTIVE" : "🔴 RAID INACTIVE";
+  const nextLabel = inRaid ? "Raid ends in" : "Raid starts in";
+
+  const content = `
+**DayZ Raid Status**
+
+${status}
+
+⏰ **CET:** ${cet}
+⏰ **EST:** ${est}
+
+⏳ **${nextLabel}:** ${countdown}
+  `;
+
+  try {
+    if (!messageRef) {
+      messageRef = await channel.send(content);
+    } else {
+      await messageRef.edit(content);
     }
+  } catch (err) {
+    console.error("Error updating message:", err);
   }
 }
 
-client.once('ready', () => {
+// 🚀 Bot ready
+client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-  updateMessage();
-  setInterval(updateMessage, 60000);
+
+  await updateMessage();
+
+  // update every 30 seconds
+  setInterval(updateMessage, 30 * 1000);
 });
 
 client.login(TOKEN);
