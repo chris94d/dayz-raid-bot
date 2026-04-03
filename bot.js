@@ -10,76 +10,130 @@ const client = new Client({
 
 let messageRef;
 
-// 🎯 Raid schedule logic (CET)
+// 🎯 Raid schedule logic (CET / Europe/Berlin handles DST automatically)
 function getRaidStatus() {
   const now = DateTime.now().setZone('Europe/Berlin');
 
-  const isWeekend = now.weekday >= 6;
+  // ✅ Friday (5), Saturday (6), Sunday (7) = weekend
+  const isWeekend = now.weekday >= 5;
 
   let start, end;
 
   if (isWeekend) {
-    // Weekend: 09:00 - 03:00 (next day)
+    // Weekend: 09:00 → 03:00 next day
     start = now.set({ hour: 9, minute: 0, second: 0 });
 
-    end = now
+    end = start
       .plus({ days: 1 })
       .set({ hour: 3, minute: 0, second: 0 });
 
-    // If before 09:00, we’re still in the previous raid window
+    // Handle early morning (00:00–03:00)
     if (now.hour < 3) {
       start = now.minus({ days: 1 }).set({ hour: 9, minute: 0, second: 0 });
       end = now.set({ hour: 3, minute: 0, second: 0 });
     }
 
   } else {
-    // Weekday: 15:00 - 23:00
+    // Weekday: 15:00 → 00:00 (midnight)
     start = now.set({ hour: 15, minute: 0, second: 0 });
-    end = now.set({ hour: 23, minute: 0, second: 0 });
+
+    end = now
+      .plus({ days: 1 })
+      .set({ hour: 0, minute: 0, second: 0 });
   }
 
   const inRaid = now >= start && now < end;
 
-  const next = inRaid ? end : start;
+  // Determine next start/end properly
+  let nextStart = start;
+  let nextEnd = end;
 
-  const diff = next.diff(now, ['hours', 'minutes', 'seconds']).toObject();
+  if (inRaid) {
+    nextEnd = end;
+  } else {
+    if (now < start) {
+      nextStart = start;
+      nextEnd = end;
+    } else {
+      // Move to next day schedule
+      let next = now.plus({ days: 1 });
+
+      const nextIsWeekend = next.weekday >= 5;
+
+      if (nextIsWeekend) {
+        nextStart = next.set({ hour: 9, minute: 0, second: 0 });
+        nextEnd = nextStart.plus({ days: 1 }).set({ hour: 3, minute: 0, second: 0 });
+      } else {
+        nextStart = next.set({ hour: 15, minute: 0, second: 0 });
+        nextEnd = next.plus({ days: 1 }).set({ hour: 0, minute: 0, second: 0 });
+      }
+    }
+  }
+
+  const target = inRaid ? nextEnd : nextStart;
+
+  const diff = target.diff(now, ['hours', 'minutes', 'seconds']).toObject();
 
   const countdown = `${Math.floor(diff.hours || 0)}h ${Math.floor(diff.minutes || 0)}m ${Math.floor(diff.seconds || 0)}s`;
 
-  return { now, inRaid, countdown };
+  return {
+    now,
+    inRaid,
+    countdown,
+    nextStart,
+    nextEnd
+  };
 }
 
 // 🕒 Format CET + EST
-function formatTimes(now) {
-  const cet = now.toFormat('HH:mm');
+function formatTimes(now, nextStart, nextEnd) {
+  const cetNow = now.toFormat('HH:mm');
 
-  const est = now
+  const estNow = now
     .setZone('America/New_York')
-    .toFormat('h:mm a'); // 12-hour format with AM/PM
+    .toFormat('h:mm a');
 
-  return { cet, est };
+  const cetStart = nextStart.toFormat('HH:mm');
+  const estStart = nextStart.setZone('America/New_York').toFormat('h:mm a');
+
+  const cetEnd = nextEnd.toFormat('HH:mm');
+  const estEnd = nextEnd.setZone('America/New_York').toFormat('h:mm a');
+
+  return {
+    cetNow,
+    estNow,
+    cetStart,
+    estStart,
+    cetEnd,
+    estEnd
+  };
 }
 
 // 🔁 Update Discord message
 async function updateMessage() {
   const channel = await client.channels.fetch(CHANNEL_ID);
 
-  const { now, inRaid, countdown } = getRaidStatus();
-  const { cet, est } = formatTimes(now);
+  const { now, inRaid, countdown, nextStart, nextEnd } = getRaidStatus();
+  const times = formatTimes(now, nextStart, nextEnd);
 
   const status = inRaid ? "🟢 RAID ACTIVE" : "🔴 RAID INACTIVE";
   const nextLabel = inRaid ? "Raid ends in" : "Raid starts in";
 
   const content = `
-**DayZ Raid Status**
+**🏴 DayZ Raid Status**
 
 ${status}
 
-⏰ **CET:** ${cet}
-⏰ **EST:** ${est}
+⏰ **Current Time**
+🇪🇺 CET: ${times.cetNow}
+🇺🇸 EST: ${times.estNow}
 
 ⏳ **${nextLabel}:** ${countdown}
-  `;
+
+📅 **Next Raid Window**
+Start → CET: ${times.cetStart} | EST: ${times.estStart}
+End → CET: ${times.cetEnd} | EST: ${times.estEnd}
+`;
 
   try {
     if (!messageRef) {
